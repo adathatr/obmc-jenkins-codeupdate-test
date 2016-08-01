@@ -1,0 +1,195 @@
+*** Settings ***
+Library         OperatingSystem
+Library         String
+Library         Collections
+Library         ./lib/jenkins_helper_lib.py    
+Library         SSHLibrary
+Library         Process
+Resource        ./src/jenkins_resource_keywords.robot
+Variables       ./data/BmcVariables.py
+
+
+*** Variables ***
+
+
+*** Test Cases ***
+
+Code update 
+
+    #Ping and Login to REST Test
+    Ping and wait For Reply    ${OPENBMC_HOST}
+    Ping rest server and verify
+   
+    #Reserves target server in jenkins
+    #Book server in jenkins
+
+    New build file download
+    Initialize code update
+       
+
+*** Keywords ***
+Ping and wait for reply
+    [Arguments]     ${ip_addr}
+    # Pings the given server and returns the RC and output
+    # ping -c 5  ip  This means count for 5 instance of succcess and return
+    Log     ping -c 5 ${ip_addr}
+    ${rc}   ${output} =     Run and return RC and Output     ping -c 5 ${ip_addr}
+    Log     ${output}
+    ${rc}     Run Keyword and Return Status     Should be equal     ${rc}    ${0}
+    Run Keyword If     ${rc} == ${False}     Fail     Failed to ping ${ip_addr}
+    Log To Console     \nPing Test [ OK ]
+
+Run REST cmd and verify
+   [Documentation]     Executest the given curl cmd and verifies its output
+   [Arguments]         ${curlCmd} 
+   Log      ${curlCmd}
+   ${rc}    ${output} =    Run and return RC and Output     ${curlCmd} 
+   Log     \n${output}
+   Should be equal     ${rc}    ${0}
+   ${match_list}    Get Regexp Matches    ${output}    "status": "(.*?)"    1
+   ${msg}    Get From List    ${match_list}    0
+   ${msg}    Convert To Lowercase    ${msg}
+   ${rc}     Run Keyword and Return Status     Should be equal    ${msg}    ok
+   [return]     ${rc}
+     
+
+Ping Rest server and verify
+   # Pings REST server and verifies the reply
+   ${rc}     Run REST cmd and verify     ${CURL_LOGIN_CMD}
+   Run Keyword If     ${rc} == ${False}     Fail     Failed to login to REST ${output}
+   Log To Console     \nREST server responding
+
+   #Preserves IP if login to REST is successful
+   ${rc}     Run REST cmd and verify     ${PRESERVE_IP_CMD}
+   Run Keyword If     ${rc} == ${False}     Fail     Unable to preserve IP ${output}
+   Log To Console     Preserved IP
+
+Book server in jenkins
+  [Documentation]    Reserves target server in jenkins
+
+  #Login to Jenkin Resource page
+
+  Should Not Be Empty   ${JENKINS_USER_ID}
+  Should Not Be Empty   ${JENKINS_PASSWORD}
+  Should Not Be Empty   ${JENKINS_URL}
+  Should Not Be Empty   ${OPENBMC_HOST}
+  Set Global Variable      ${JENKINS_USER_ID}
+  Set Global Variable      ${JENKINS_PASSWORD}
+  Set Global Variable      ${JENKINS_URL}
+  Set Global Variable      ${OPENBMC_HOST}
+
+  # Using headless
+  # You can use the browser directly here as well
+  Launch Headless Browser   ${JENKINS_URL}
+
+  Wait Until Element Is Visible    ${SUBMIT_XPATH}
+
+                    # Locator               #input text
+  Input Text        ${LOGIN_USER_XPATH}     ${JENKINS_USER_ID}
+  Input Text        ${LOGIN_PASSWD_XPATH}   ${JENKINS_PASSWORD}
+  Click Element     ${SUBMIT_XPATH}
+
+  Page Should Contain    Lockable Resources
+
+
+  #Count resource added in the page
+
+  ${count} =   Count Resource Table Entries
+  Log    ${count}
+
+
+  #Get the row containing resource in the page
+
+  ${row} =  Lookup Resource Table Entries   ${OPENBMC_HOST}
+  Log    ${row}
+
+  #Lock the entry by index
+
+  ${row} =  Lookup Resource Table Entries   ${OPENBMC_HOST}
+  Log    ${row}
+  Reserve Target Entry  ${row}
+
+  # Set it for release example
+  Set Suite Variable    ${ROW_INDEX}   ${row}
+  Log To Console     \nReserved BMC Host in Jenkins
+
+Download BMC Tar image
+  [Documentation]   Download the file
+  [Arguments]       ${url}   ${tar_file_version}
+
+  ${URL_FILE} =    Catenate  SEPARATOR=   ${url}   ${tar_file_version}
+  Log To Console   \n${URL_FILE}
+  ${targetFileSiz}=   Download_URL_Tar_File   ${URL_FILE}
+  [return]     ${targetFileSiz}
+
+
+New build file download
+  [Documentation]   Connect to system and execute command
+
+  ${serverVersion} =   Login and Execute Command   ${OPENBMC_HOST}   cat /etc/version
+  Log     ${serverVersion}
+
+  ${file_details}     Run Keyword      Get_File_info_From_Url     ${BUILD_URL}   
+  Log     ${file_details}
+  ${file_name}     Get From List    ${file_details}    0
+  Set Global Variable    ${file_name}  
+  ${file_size}     Get From List    ${file_details}    1  
+  
+  ${buildVersion}     Get Regexp Matches     ${file_name}     .*?-([0-9]*?).all.tar     1
+  ${buildVersion}     Get From List     ${buildVersion}     0
+  ${rc}     Run Keyword and Return Status     Should be equal     ${serverVersion}     ${buildVersion}
+  #[return]     ${rc}
+  Log     ${rc}
+  
+  ${output}     Run Keyword If     ${rc}==${True}      Log To Console    \nSystem is upto date
+  ...     ELSE       Run Keyword And Return Status     OperatingSystem.File Should Exist     ${file_name}
+  Log    ${output} 
+  Run Keyword If     ${rc}==${False} and ${output}==${False}    Log To Console     Downloading.... ${file_name} 
+  ${targetFileSz}      Run Keyword If     ${rc}==${False} and ${output}==${False}    Download BMC Tar image     ${BUILD_URL}     ${file_name} 
+  ${result}  Run Keyword and Return If     ${rc}==${False} and ${output}==${False}     Should Be Equal        ${targetFileSz}       ${file_size.strip('.00 MB')}
+  Run Keyword If     ${result} == ${False}     Fail     File size mismatch Server: ${file_size.strip('.00 MB')} Target: ${targetFileSz}
+  Log To Console     \nImage file:${file_name} 
+
+Initialize code update
+  [Documentation]   Performs code update
+
+  #SCP the tar image to BMC IP 
+  #${rc}=    scp_file    ${OPENBMC_HOST}    ${OPENBMC_ID}    ${OPENBMC_PWD}    ${file_name}    /tmp/flashimg
+  #Run Keyword If     ${rc} != ${0}     Fail     Unable to SCP file ${file_name} to ${OPENBMC_HOST}
+  #Open Connection      ${OPENBMC_HOST}
+  #Login     ${OPENBMC_ID}    ${OPENBMC_PWD}
+  #Put File     ${file_name}     /tmp/flashimg
+  #Close Connection
+
+  ${rc}     Run Keyword and Return Status    Run Process     sshpass -p ${OPENBMC_PWD} scp ./${file_name} ${OPENBMC_ID}@${OPENBMC_HOST}:${IMG_PATH}     shell=True
+  Run Keyword If     ${rc} == ${False}     Fail     Failed to copy img 
+  Log To Console     \nSuccessfully copied
+
+  
+  #Set the BMC update action/update 
+  ${UPD_ACTION}     Set Variable     curl -c cjar -b cjar -k -H "Content-Type:application/json" -d '{"data": ["${IMG_PATH}"] }' -X POST https://${OPENBMC_HOST}/org/openbmc/control/flash/bmc/action/update
+  ${rc}     Run REST cmd and verify     ${UPD_ACTION}
+  Run Keyword If     ${rc} == ${False}     Fail     Failed Action update 
+  Log To Console     \nAction Update Success
+
+  #Check the status
+  ${rc}     Run REST cmd and verify     ${GET_STATUS_CMD}
+  Run Keyword If     ${rc} == ${False}     Fail     Status Check [FAIL]
+  Log To Console     \nStatus Check [OK]
+
+  #Reboot
+#  ${rc}     Run REST cmd and verify     ${REBOOT_CMD}
+#  Run Keyword If     ${rc} == ${False}     Fail     Reboot [FAIL]
+#  Log To Console     \nReboot [OK]
+#
+#  Sleep     20 minutes
+#
+#  ${serverVersion} =   Login and Execute Command   ${OPENBMC_HOST}   cat /etc/version
+#  ${rc}     Run Keyword and Return Status     Should be equal     ${serverVersion}     ${buildVersion}
+#  Run Keyword If     ${rc} == ${False}     Fail     Code update failed. Version mismatch ${serverVersion} ${buildVersion}
+#  Log To Console     \nCode update [SUCCESS]
+
+  
+
+
+                                                         
